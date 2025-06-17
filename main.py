@@ -27,7 +27,7 @@ def select_folder():
 
 def extract_month_year(filename):
     """Extract month and year from filename."""
-    # Try to match patterns like "Billing Jan 2025.xls" or "Receipts_Jan_2025.xlsx"
+    # Try to match patterns like "Billing May 2025" or "Receipts Apr 2025"
     match = re.search(
         r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{4})',
         filename, re.IGNORECASE)
@@ -48,42 +48,119 @@ def find_matching_file(files, month_year):
 
 def load_excel_file(file_path):
     """Load an Excel file into a pandas DataFrame, handling different Excel formats."""
+    import time
+
+    print(f"  Loading file: {file_path}")
+    start_time = time.time()
+
     try:
         # Try to determine if it's an .xls or .xlsx file
         if file_path.lower().endswith('.xls'):
+            # First list all available sheet names
+            try:
+                book = xlrd.open_workbook(file_path, on_demand=True)
+                sheet_names = book.sheet_names()
+                print(
+                    f"  Available sheets in {os.path.basename(file_path)}: {sheet_names}"
+                )
+            except Exception as e:
+                print(f"  Error reading sheet names: {str(e)}")
+                sheet_names = []
+
             # Handle Excel 97-2003 (.xls) files
-            df = pd.read_excel(file_path, engine='xlrd')
+            if "Billing" in file_path:
+                sheet_name = "H" if "H" in sheet_names else sheet_names[
+                    0] if sheet_names else "Sheet1"
+                print(f"  Using sheet '{sheet_name}' for billing file")
+                df = pd.read_excel(file_path,
+                                   sheet_name=sheet_name,
+                                   engine='xlrd')
+            # For receipt files, look for "Sheet 1"
+            elif "Receipts" in file_path:
+                sheet_name = "Sheet 1" if "Sheet 1" in sheet_names else sheet_names[
+                    0] if sheet_names else "Sheet1"
+                print(f"  Using sheet '{sheet_name}' for receipt file")
+                df = pd.read_excel(file_path,
+                                   sheet_name=sheet_name,
+                                   engine='xlrd')
+            else:
+                df = pd.read_excel(file_path, engine='xlrd')
         else:
             # Handle newer Excel (.xlsx) files
-            df = pd.read_excel(file_path, engine='openpyxl')
+            try:
+                xl = openpyxl.load_workbook(file_path, read_only=True)
+                sheet_names = xl.sheetnames
+                print(
+                    f"  Available sheets in {os.path.basename(file_path)}: {sheet_names}"
+                )
+            except Exception as e:
+                print(f"  Error reading sheet names: {str(e)}")
+                sheet_names = []
+
+            # For billing files, look for sheet "H"
+            if "Billing" in file_path:
+                sheet_name = "H" if "H" in sheet_names else sheet_names[
+                    0] if sheet_names else "Sheet1"
+                print(f"  Using sheet '{sheet_name}' for billing file")
+                df = pd.read_excel(file_path,
+                                   sheet_name=sheet_name,
+                                   engine='openpyxl')
+            # For receipt files, look for "Sheet 1"
+            elif "Receipts" in file_path:
+                sheet_name = "Sheet 1" if "Sheet 1" in sheet_names else sheet_names[
+                    0] if sheet_names else "Sheet1"
+                print(f"  Using sheet '{sheet_name}' for receipt file")
+                df = pd.read_excel(file_path,
+                                   sheet_name=sheet_name,
+                                   engine='openpyxl')
+            else:
+                df = pd.read_excel(file_path, engine='openpyxl')
+
+        elapsed = time.time() - start_time
+        print(
+            f"  Successfully loaded file with {len(df)} rows in {elapsed:.2f} seconds"
+        )
+
+        # Clean up the DataFrame - convert object columns to string for easier comparison
+        for col in df.select_dtypes(include=['object']).columns:
+            df[col] = df[col].astype(str)
+
+        # Replace 'nan' strings with empty strings
+        df = df.replace('nan', '')
 
         return df
     except Exception as e:
-        print(f"Error loading {file_path}: {str(e)}")
+        print(f"  Error loading {file_path}: {str(e)}")
+        import traceback
+        print(f"  Traceback: {traceback.format_exc()}")
         return pd.DataFrame()  # Return empty DataFrame on error
 
 
 def determine_policy_column(df, is_receipt=False):
     """Determine the column name that contains policy numbers."""
     if is_receipt:
-        # For receipt files
+        # For receipt files - exact match for 'PolicyNo'
+        if 'PolicyNo' in df.columns:
+            return 'PolicyNo'
+    else:
+        # For billing files - exact match for 'Policy_Number'
+        if 'Policy_Number' in df.columns:
+            return 'Policy_Number'
+
+    # If the exact column names aren't found, look for similar names
+    if is_receipt:
         policy_cols = [
-            'PolicyNo', 'Policy No', 'Policy_No', 'Policy Number',
-            'PolicyNumber'
+            'Policy No', 'Policy_No', 'Policy Number', 'PolicyNumber'
         ]
     else:
-        # For billing files
-        policy_cols = [
-            'Policy_Number', 'Policy Number', 'PolicyNumber', 'Policy No',
-            'Policy#'
-        ]
+        policy_cols = ['Policy Number', 'PolicyNumber', 'Policy No', 'Policy#']
 
-    # Check for exact matches first
+    # Check for alternative column names
     for col in policy_cols:
         if col in df.columns:
             return col
 
-    # If no exact match, look for partial matches
+    # If still not found, look for partial matches
     for col in df.columns:
         if 'policy' in col.lower():
             return col
@@ -98,19 +175,25 @@ def determine_policy_column(df, is_receipt=False):
 def determine_amount_column(df, is_receipt=False):
     """Determine the column name that contains amount information."""
     if is_receipt:
+        # For receipt files - exact match for 'ReceiptAmount'
+        if 'ReceiptAmount' in df.columns:
+            return 'ReceiptAmount'
+    else:
+        # For billing files - exact match for 'Premium'
+        if 'Premium' in df.columns:
+            return 'Premium'
+
+    # If the exact column names aren't found, look for alternatives
+    if is_receipt:
         # For receipt files
-        amount_cols = [
-            'ReceiptAmount', 'Receipt Amount', 'Amount', 'Payment',
-            'PaymentAmount'
-        ]
+        amount_cols = ['Receipt Amount', 'Amount', 'Payment', 'PaymentAmount']
     else:
         # For billing files
         amount_cols = [
-            'Premium', 'Premium Amount', 'Amount', 'Bill Amount',
-            'BillingAmount'
+            'Premium Amount', 'Amount', 'Bill Amount', 'BillingAmount'
         ]
 
-    # Check for exact matches first
+    # Check for alternative column names
     for col in amount_cols:
         if col in df.columns:
             return col
@@ -162,19 +245,18 @@ def determine_name_columns(df, is_receipt=False):
     return name_info
 
 
-def determine_product_column(df):
+def determine_product_column(df, is_receipt=False):
     """Determine the column that contains product information."""
-    # The product information is in a column named "Client name"
-    if "Client name" in df.columns:
-        return "Client name"
+    # For billing files, the product is in the 'Product' column
+    if not is_receipt and 'Product' in df.columns:
+        return 'Product'
 
-    # Check for similar column names
-    for col in df.columns:
-        if "client name" in col.lower() or "clientname" in col.lower():
-            return col
+    # For receipt files, check if ClientName might have product info
+    if is_receipt and 'ClientName' in df.columns:
+        return 'ClientName'
 
     # Check for other potential product columns as fallback
-    product_cols = ["Product", "Plan", "Policy Type", "Plan Type"]
+    product_cols = ["Plan", "Policy Type", "Plan Type"]
     for col in product_cols:
         if col in df.columns:
             return col
@@ -224,6 +306,14 @@ def analyze_payments(billing_df, receipt_df, month_year, policy_history=None):
         summary: Dictionary with summary statistics
         policy_history: Updated policy history dictionary
     """
+    import time
+
+    print(f"  Starting analysis for {month_year}...")
+    print(f"  Billing data: {len(billing_df)} rows")
+    print(f"  Receipt data: {len(receipt_df)} rows")
+
+    start_time = time.time()
+
     if policy_history is None:
         policy_history = {}
 
@@ -237,18 +327,45 @@ def analyze_payments(billing_df, receipt_df, month_year, policy_history=None):
     billing_name_info = determine_name_columns(billing_df, is_receipt=False)
     receipt_name_info = determine_name_columns(receipt_df, is_receipt=True)
 
-    # Find product column (which is named "Client name")
-    billing_product_col = determine_product_column(billing_df)
-    receipt_product_col = determine_product_column(receipt_df)
+    # Find product column
+    billing_product_col = determine_product_column(billing_df,
+                                                   is_receipt=False)
+    receipt_product_col = determine_product_column(receipt_df, is_receipt=True)
 
     print(
-        f"Billing columns identified: Policy={billing_policy_col}, Amount={billing_amount_col}, Product={billing_product_col}"
+        f"  Billing columns identified: Policy={billing_policy_col}, Amount={billing_amount_col}, Product={billing_product_col}"
     )
     print(
-        f"Receipt columns identified: Policy={receipt_policy_col}, Amount={receipt_amount_col}, Product={receipt_product_col}"
+        f"  Receipt columns identified: Policy={receipt_policy_col}, Amount={receipt_amount_col}, Product={receipt_product_col}"
     )
 
-    # Initialize results DataFrame
+    # Convert receipt data to a dictionary for faster lookups
+    receipt_dict = {}
+    receipt_counter = 0
+
+    print("  Creating receipt lookup dictionary...")
+    for _, receipt_row in receipt_df.iterrows():
+        receipt_counter += 1
+        if receipt_counter % 1000 == 0:
+            print(
+                f"    Processed {receipt_counter}/{len(receipt_df)} receipt rows"
+            )
+
+        if receipt_policy_col not in receipt_row or pd.isna(
+                receipt_row[receipt_policy_col]):
+            continue
+
+        policy_number = str(receipt_row[receipt_policy_col]).strip()
+        if not policy_number:
+            continue
+
+        # Store receipt data in dictionary
+        receipt_dict[policy_number] = receipt_row
+
+    print(f"  Receipt dictionary created with {len(receipt_dict)} policies")
+    print(f"  Dictionary creation took {time.time() - start_time:.2f} seconds")
+
+    # Initialize results list
     results = []
 
     # Process billing records
@@ -265,12 +382,21 @@ def analyze_payments(billing_df, receipt_df, month_year, policy_history=None):
     if billing_policy_col and billing_policy_col in billing_df.columns:
         billing_df[billing_policy_col] = billing_df[billing_policy_col].astype(
             str)
-    if receipt_policy_col and receipt_policy_col in receipt_df.columns:
-        receipt_df[receipt_policy_col] = receipt_df[receipt_policy_col].astype(
-            str)
 
     # Process billing data
+    billing_counter = 0
+    billing_start_time = time.time()
+
+    print("  Processing billing data...")
+
     for _, billing_row in billing_df.iterrows():
+        billing_counter += 1
+        if billing_counter % 1000 == 0:
+            elapsed = time.time() - billing_start_time
+            print(
+                f"    Processed {billing_counter}/{len(billing_df)} billing rows ({elapsed:.2f} seconds, {billing_counter/elapsed:.1f} rows/sec)"
+            )
+
         if billing_policy_col not in billing_row or pd.isna(
                 billing_row[billing_policy_col]):
             continue
@@ -292,13 +418,12 @@ def analyze_payments(billing_df, receipt_df, month_year, policy_history=None):
         # Initialize paid amount
         paid_amount = 0
 
-        # Find matching receipt
-        matching_receipt = receipt_df[receipt_df[receipt_policy_col] ==
-                                      policy_number]
+        # Check if this policy exists in receipt dictionary
+        if policy_number in receipt_dict:
+            # Get receipt row from dictionary
+            receipt_row = receipt_dict[policy_number]
 
-        if not matching_receipt.empty:
-            # Get paid amount from matching receipt
-            receipt_row = matching_receipt.iloc[0]
+            # Get paid amount
             if receipt_amount_col and receipt_amount_col in receipt_row:
                 if pd.notna(receipt_row[receipt_amount_col]
                             ) and receipt_row[receipt_amount_col] != '':
@@ -379,15 +504,23 @@ def analyze_payments(billing_df, receipt_df, month_year, policy_history=None):
             if not history.get('product') and product_name:
                 history['product'] = product_name
 
+    print(
+        f"  Completed processing {billing_counter} billing records in {time.time() - billing_start_time:.2f} seconds"
+    )
+
     # Process receipts with no corresponding billing
-    for _, receipt_row in receipt_df.iterrows():
-        if receipt_policy_col not in receipt_row or pd.isna(
-                receipt_row[receipt_policy_col]):
+    print("  Processing receipts not in billing data...")
+
+    receipt_only_counter = 0
+    receipt_only_start_time = time.time()
+
+    for policy_number, receipt_row in receipt_dict.items():
+        if policy_number in processed_receipts:
             continue
 
-        policy_number = str(receipt_row[receipt_policy_col]).strip()
-        if not policy_number or policy_number in processed_receipts:
-            continue
+        receipt_only_counter += 1
+        if receipt_only_counter % 1000 == 0:
+            print(f"    Processed {receipt_only_counter} receipt-only records")
 
         # Get paid amount
         paid_amount = 0
@@ -451,7 +584,12 @@ def analyze_payments(billing_df, receipt_df, month_year, policy_history=None):
                 if not history.get('product') and product_name:
                     history['product'] = product_name
 
+    print(
+        f"  Completed processing {receipt_only_counter} receipt-only records in {time.time() - receipt_only_start_time:.2f} seconds"
+    )
+
     # Create results DataFrame
+    print("  Creating results DataFrame...")
     results_df = pd.DataFrame(results)
 
     # Calculate summary statistics
@@ -465,6 +603,11 @@ def analyze_payments(billing_df, receipt_df, month_year, policy_history=None):
         'Not Billed': not_billed_count,
         'Total': total_policies
     }
+
+    print(
+        f"  Analysis for {month_year} completed in {time.time() - start_time:.2f} seconds"
+    )
+    print(f"  Summary: {summary}")
 
     return results_df, summary, policy_history
 
